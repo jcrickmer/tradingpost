@@ -6,12 +6,10 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from market.models import Participant, BuyOrder, SellOrder, Transaction, Stock, Inventory, Market
+from market.models import Participant, BuyOrder, SellOrder, Transaction, Stock, Inventory, Market, Account, ExternalMarketPrice
 
 import sys
 err = sys.stderr
-
-# Create your tests here.
 
 
 class BasicTestCase(TestCase):
@@ -168,12 +166,22 @@ class BasicTestCase(TestCase):
         self.assertEquals(.55, market.current_ask_price(stock))
         self.assertEquals(.45, market.current_bid_price(stock))
 
-    def test_market_simple_transaction(self):
+    def test_clear_market_simple_transaction(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 3.0
+        buy_price = .51
+        sell_price = buy_price
+
         stock = Stock()
         stock.save()
 
         seller = Participant()
         seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
 
         inv = Inventory()
         inv.owner = seller
@@ -187,25 +195,30 @@ class BasicTestCase(TestCase):
         sell.inventory = inv
         sell.quantity = 1
         sell.order_type = SellOrder.LIMIT_ORDER
-        sell.price = .51
+        sell.price = sell_price
         sell.save()
         sell = SellOrder.objects.get(pk=sell.id)
 
         buyer = Participant()
         buyer.save()
 
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
         buy = BuyOrder()
         buy.buyer = buyer
         buy.stock = stock
         buy.quantity = 1
         buy.order_type = BuyOrder.LIMIT_ORDER
-        buy.price = .51
+        buy.price = buy_price
         buy.save()
         buy = BuyOrder.objects.get(pk=buy.id)
 
         market = Market()
-        self.assertEquals(.51, market.current_ask_price(stock))
-        self.assertEquals(.51, market.current_bid_price(stock))
+        self.assertEquals(buy_price, market.current_ask_price(stock))
+        self.assertEquals(buy_price, market.current_bid_price(stock))
 
         # seller should have 1 item of this stock in inventory.
         self.assertEquals(Inventory.manager.count(seller, stock), 1)
@@ -214,13 +227,14 @@ class BasicTestCase(TestCase):
 
         market.clear_market()
 
+        xaction_count = Transaction.objects.all().count()
         xactions = Transaction.objects.filter(buy_order=buy)
         self.assertEquals(xactions.count(), 1)
         xaction = xactions[0]
         self.assertEquals(xaction, buy.get_transaction())
         self.assertEquals(xaction.buy_order.id, buy.id)
         self.assertEquals(xaction.sell_order.id, sell.id)
-        self.assertEquals(xaction.price, .51)
+        self.assertEquals(xaction.price, buy_price)
 
         self.assertLessEqual(xaction.filled_datetime, timezone.now())
 
@@ -228,5 +242,905 @@ class BasicTestCase(TestCase):
         self.assertEquals(Inventory.manager.count(seller, stock), 0)
         # buyer should have inventory.
         self.assertEquals(Inventory.manager.count(buyer, stock), 1)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds + buy_price)
+        self.assertEquals(baccount.balance(), buyer_init_funds - buy_price)
+        self.assertEquals(market.current_market_price(stock), buy_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), buy_price)
+
+    def test_clear_market_b_mark_funded_s_mark(self):
+        seller_init_funds = 1.75
+        # FUNDED
+        buyer_init_funds = 3.0
+        market_price = .4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.MARKET_ORDER
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.MARKET_ORDER
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+        self.assertEquals(market_price, market.current_market_price(stock))
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        self.assertEquals(xactions.count(), 1)
+        xaction = xactions[0]
+        self.assertEquals(xaction, buy.get_transaction())
+        self.assertEquals(xaction.buy_order.id, buy.id)
+        self.assertEquals(xaction.sell_order.id, sell.id)
+        self.assertEquals(xaction.price, market_price)
+
+        self.assertLessEqual(xaction.filled_datetime, timezone.now())
+
+        # seller should have reduced inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 0)
+        # buyer should have inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 1)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds + market_price)
+        self.assertEquals(baccount.balance(), buyer_init_funds - market_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+    def test_clear_market_b_mark_unfunded_s_mark(self):
+        seller_init_funds = 1.75
+        # UNFUNDED
+        buyer_init_funds = .285
+        market_price = .4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.MARKET_ORDER
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.MARKET_ORDER
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+        self.assertEquals(market_price, market.current_market_price(stock))
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        # There should be no transaction - buyer had insufficient funds
+        self.assertEquals(xactions.count(), 0)
+
+        # seller should have same inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have same inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds)
+        self.assertEquals(baccount.balance(), buyer_init_funds)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+
+    def test_clear_market_b_lim_funded_s_mark_match(self):
+        seller_init_funds = 1.75
+        # FUNDED
+        buyer_init_funds = 3.0
+        market_price = .4875
+        buy_price = .45
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.MARKET_ORDER
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.LIMIT_ORDER
+        buy.price = buy_price
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+        self.assertEquals(market_price, market.current_market_price(stock))
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        self.assertEquals(xactions.count(), 1)
+        xaction = xactions[0]
+        self.assertEquals(xaction, buy.get_transaction())
+        self.assertEquals(xaction.buy_order.id, buy.id)
+        self.assertEquals(xaction.sell_order.id, sell.id)
+        self.assertEquals(xaction.price, buy_price)
+
+        self.assertLessEqual(xaction.filled_datetime, timezone.now())
+
+        # seller should have reduced inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 0)
+        # buyer should have inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 1)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds + buy_price)
+        self.assertEquals(baccount.balance(), buyer_init_funds - buy_price)
+
+        # Market price should now be the buy price
+        self.assertEquals(market.current_market_price(stock), buy_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), buy_price)
+
+    def test_clear_market_b_lim_unfunded_s_mark_match(self):
+        seller_init_funds = 1.75
+        # UNFUNDED
+        buyer_init_funds = 0.111
+        market_price = .4875
+        buy_price = .45
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.MARKET_ORDER
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.LIMIT_ORDER
+        buy.price = buy_price
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+        self.assertEquals(market_price, market.current_market_price(stock))
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        # no transaction should have hapened - buyer did not have sufficient funds
+        self.assertEquals(xactions.count(), 0)
+
+        # seller should have same inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have same inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        # no money should have changed hands
+        self.assertEquals(saccount.balance(), seller_init_funds)
+        self.assertEquals(baccount.balance(), buyer_init_funds)
+
+        # Market price should have remained unchanged - no transaction happened
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+    def test_clear_market_b_lim_funded_s_mark_nomatch(self):
+        # this case does not really exist
+        pass
+
+    def test_clear_market_b_lim_unfunded_s_mark_nomatch(self):
+        # this case does not really exist
+        pass
+
+    def test_clear_market_b_lim_funded_s_lim_match(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 3.0
+        buy_price = .51
+        sell_price = .49
+        market_price = .4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.LIMIT_ORDER
+        sell.price = sell_price
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.LIMIT_ORDER
+        buy.price = buy_price
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+        self.assertGreater(buy_price, market.current_ask_price(stock))
+        self.assertLess(sell_price, market.current_bid_price(stock))
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        self.assertEquals(xactions.count(), 1)
+        xaction = xactions[0]
+        self.assertEquals(xaction, buy.get_transaction())
+        self.assertEquals(xaction.buy_order.id, buy.id)
+        self.assertEquals(xaction.sell_order.id, sell.id)
+        self.assertEquals(xaction.price, sell_price)
+
+        self.assertLessEqual(xaction.filled_datetime, timezone.now())
+
+        # seller should have reduced inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 0)
+        # buyer should have inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 1)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds + sell_price)
+        self.assertEquals(baccount.balance(), buyer_init_funds - sell_price)
+        self.assertEquals(market.current_market_price(stock), sell_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), sell_price)
+
+    def test_clear_market_b_lim_funded_s_lim_nomatch(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 3.0
+        buy_price = .49
+        sell_price = .51
+        market_price = .4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.LIMIT_ORDER
+        sell.price = sell_price
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.LIMIT_ORDER
+        buy.price = buy_price
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        # Could not agree on price. So no transaction
+        self.assertEquals(xactions.count(), 0)
+
+        # seller should have same inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have same inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds)
+        self.assertEquals(baccount.balance(), buyer_init_funds)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+    def test_clear_market_b_lim_unfunded_s_lim_match(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 0.001
+        buy_price = .51
+        sell_price = .49
+        market_price = .4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.LIMIT_ORDER
+        sell.price = sell_price
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.LIMIT_ORDER
+        buy.price = buy_price
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        # Buyer did not have funds. So no transaction.
+        self.assertEquals(xactions.count(), 0)
+
+        # seller should have same inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have same inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds)
+        self.assertEquals(baccount.balance(), buyer_init_funds)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+    def test_clear_market_b_lim_unfunded_s_lim_nomatch(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 0.013
+        buy_price = .49
+        sell_price = .51
+        market_price = .4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.LIMIT_ORDER
+        sell.price = sell_price
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.LIMIT_ORDER
+        buy.price = buy_price
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        # Could not agree on price, and did not have funds. So no transaction
+        self.assertEquals(xactions.count(), 0)
+
+        # seller should have same inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have same inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds)
+        self.assertEquals(baccount.balance(), buyer_init_funds)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+    def test_clear_market_b_mark_funded_s_lim_match(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 3.0
+        sell_price = 0.501
+        market_price = 0.4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.LIMIT_ORDER
+        sell.price = sell_price
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.MARKET_ORDER
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        self.assertEquals(xactions.count(), 1)
+        xaction = xactions[0]
+        self.assertEquals(xaction, buy.get_transaction())
+        self.assertEquals(xaction.buy_order.id, buy.id)
+        self.assertEquals(xaction.sell_order.id, sell.id)
+        self.assertEquals(xaction.price, sell_price)
+
+        self.assertLessEqual(xaction.filled_datetime, timezone.now())
+
+        # seller should have reduced inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 0)
+        # buyer should have inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 1)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds + sell_price)
+        self.assertEquals(baccount.balance(), buyer_init_funds - sell_price)
+        self.assertEquals(market.current_market_price(stock), sell_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), sell_price)
+
+    def test_clear_market_b_mark_funded_s_lim_nomatch(self):
+        # This is not a scenario that can happen. If the Buyer is
+        # buying at Market price, then he will buy at whatever the
+        # lowest seller price is, which would create a match.
+        pass
+
+    def test_clear_market_b_mark_unfunded_s_lim_match(self):
+        seller_init_funds = 1.75
+        buyer_init_funds = 0.1234
+        sell_price = 0.501
+        market_price = 0.4875
+
+        stock = Stock()
+        stock.save()
+        emp = ExternalMarketPrice()
+        emp.price = market_price
+        emp.stock = stock
+        emp.save()
+
+        seller = Participant()
+        seller.save()
+
+        saccount = Account()
+        saccount.owner = seller
+        saccount.funds = seller_init_funds
+        saccount.save()
+
+        inv = Inventory()
+        inv.owner = seller
+        inv.stock = stock
+        inv.quantity = 1
+        inv.value = .5
+        inv.save()
+
+        sell = SellOrder()
+        sell.seller = seller
+        sell.inventory = inv
+        sell.quantity = 1
+        sell.order_type = SellOrder.LIMIT_ORDER
+        sell.price = sell_price
+        sell.save()
+        sell = SellOrder.objects.get(pk=sell.id)
+
+        buyer = Participant()
+        buyer.save()
+
+        baccount = Account()
+        baccount.owner = buyer
+        baccount.funds = buyer_init_funds
+        baccount.save()
+
+        buy = BuyOrder()
+        buy.buyer = buyer
+        buy.stock = stock
+        buy.quantity = 1
+        buy.order_type = BuyOrder.MARKET_ORDER
+        buy.save()
+        buy = BuyOrder.objects.get(pk=buy.id)
+
+        market = Market()
+
+        # seller should have 1 item of this stock in inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have none.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        market.clear_market()
+
+        xaction_count = Transaction.objects.all().count()
+        xactions = Transaction.objects.filter(buy_order=buy)
+        # no money, no transcation
+        self.assertEquals(xactions.count(), 0)
+
+        # seller should have same inventory.
+        self.assertEquals(Inventory.manager.count(seller, stock), 1)
+        # buyer should have same inventory.
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        saccount = Account.objects.get(pk=saccount.id)
+        baccount = Account.objects.get(pk=baccount.id)
+        self.assertEquals(saccount.balance(), seller_init_funds)
+        self.assertEquals(baccount.balance(), buyer_init_funds)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+        # one last check to make sure that clearing the market again doesn't dup any transactions
+        market.clear_market()
+        self.assertEquals(Transaction.objects.all().count(), xaction_count)
+        self.assertEquals(market.current_market_price(stock), market_price)
+
+    def test_clear_market_b_mark_unfunded_s_lim_nomatch(self):
+        # When there is an order at market, there is always a
+        # match. So this case isn't possible.
+        pass
 
     ''' You cannot assign inventory to an owner unless the related_buy is None, or the BuyOrder.owner is the same as the Inventory.owner.'''

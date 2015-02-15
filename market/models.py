@@ -78,6 +78,15 @@ class Transaction(models.Model):
     filled_datetime = models.DateTimeField(default=timezone.now, auto_now=True, null=False)
     # For now, quantity must match
 
+    def __unicode__(self):
+        return '[Transaction {}: {} sold {} to {} for {} at {}]'.format(
+            self.id,
+            self.sell_order.seller,
+            self.buy_order.stock,
+            self.buy_order.buyer,
+            self.price,
+            self.filled_datetime)
+
 
 class Stock(models.Model):
     id = models.AutoField(primary_key=True)
@@ -113,6 +122,25 @@ class Inventory(models.Model):
         return '[Inventory {}: ]'.format(self.id)
 
 
+class Account(models.Model):
+    id = models.AutoField(primary_key=True)
+    owner = models.ForeignKey('Participant', unique=True, null=False)
+    funds = models.FloatField(null=False)
+
+    def balance(self):
+        return self.funds
+
+    def escrow_funds(self, amount):
+        pass
+
+
+class ExternalMarketPrice(models.Model):
+    id = models.AutoField(primary_key=True)
+    stock = models.ForeignKey('Stock', null=False)
+    price_datetime = models.DateTimeField(default=timezone.now, auto_now=True, null=False)
+    price = models.FloatField(null=False)
+
+
 class Market():
 
     def match(self):
@@ -137,13 +165,18 @@ class Market():
         result = None
 
         # First, let's just get the most recent transaction and use it to determine market price
-        transaction = Transaction.objects.filter(stock=stock).order_by('-filled_datetime')
+        transaction = Transaction.objects.filter(buy_order__stock=stock).order_by('-filled_datetime').first()
         if transaction is not None:
             result = transaction.price
 
         if result is None:
-            # REVISIT - well, let's pick a different strategy
-            pass
+            # Well, let's look for an external market price
+            emp = ExternalMarketPrice.objects.filter(stock=stock).order_by('-price_datetime').first()
+            if emp is not None:
+                result = emp.price
+            else:
+                # raise an error?
+                pass
 
         return result
 
@@ -155,7 +188,7 @@ class Market():
 
         # Fore each of these buys, let's see if we can find someone willing to sell at that price
         for buyorder in buys:
-            sys.stderr.write(str(buyorder.buyer) + " is looking for seller of " + str(buyorder.stock))
+            #sys.stderr.write(str(buyorder.buyer) + " is looking for seller of " + str(buyorder.stock))
             # You cannot buy from yourself.
             sellorder_qs = SellOrder.objects.exclude(seller=buyorder.buyer)
             # Only look at stock that we are buying
@@ -165,33 +198,47 @@ class Market():
             # the have not already been transacted
             sellorder_qs = sellorder_qs.filter(transaction=None)
             if buyorder.order_type == buyorder.MARKET_ORDER:
-                sys.stderr.write(" at market price.\n")
+                #sys.stderr.write(" at market price.\n")
                 # Market order...
                 pass
             else:
-                sys.stderr.write(" at no more than " + str(buyorder.price) + "\n")
+                #sys.stderr.write(" at no more than " + str(buyorder.price) + "\n")
                 # Limit order... constrain by price.
-                sellorder_qs = sellorder_qs.filter(price__lte=buyorder.price)
+                sellorder_qs = sellorder_qs.filter(
+                    Q(order_type=SellOrder.LIMIT_ORDER, price__lte=buyorder.price) | Q(order_type=SellOrder.MARKET_ORDER))
 
             # and of course look for the best price
             sellorder_qs = sellorder_qs.order_by('price')
+            # REVISIT - Need to make sure that we transact the oldest orders at the lowest price first.
 
             sellorder = sellorder_qs.first()
-
+            #sys.stderr.write("sellorder is " + str(sellorder) + "\n")
             if sellorder is not None:
                 # let's make a deal!!
                 # REVISIT - we should make this all atomic!!!
 
-                sys.stderr.write("Woot! look at " + str(sellorder) + "\n")
-                # first, create a transaction
+                #sys.stderr.write("Woot! look at " + str(sellorder) + "\n")
+                # first, figure out the price.
+                xaction_price = sellorder.price
+                if xaction_price is None:
+                    xaction_price = buyorder.price
+
+                if buyorder.order_type == buyorder.MARKET_ORDER and sellorder.order_type == sellorder.MARKET_ORDER and xaction_price is None:
+                    xaction_price = self.current_market_price(buyorder.stock)
+
+                # second, does the buyer have money?
+                buy_acct = Account.objects.filter(owner=buyorder.buyer).first()
+                if buy_acct.balance() < xaction_price:
+                    # no dice
+                    continue
+
+                # third, create a transaction
                 xaction = Transaction()
                 xaction.buy_order = buyorder
                 xaction.sell_order = sellorder
-                if buyorder.order_type == buyorder.MARKET_ORDER:
-                    xaction.price = sellorder.price  # REVISIT - this may not be the price because the sell order could be market, not limit
-                else:
-                    xaction.price = buyorder.price
+                xaction.price = xaction_price
                 xaction.save()
+
                 # now move the inventory
                 seller_out_inv = Inventory()
                 seller_out_inv.owner = sellorder.seller
@@ -207,10 +254,12 @@ class Market():
                 buyer_in_inv.related_buy = buyorder
                 buyer_in_inv.save()
 
-                # now move the money
-                # REVISIT - haven't even looked at money yet!
-        # Find all open sells.
-
-        # Match them.
-
+                # last move the money
+                buy_acct = Account.objects.filter(owner=buyorder.buyer).first()
+                sell_acct = Account.objects.filter(owner=sellorder.seller).first()
+                buy_acct.funds = buy_acct.funds - xaction.price
+                sell_acct.funds = sell_acct.funds + xaction.price
+                buy_acct.save()
+                sell_acct.save()
+                #sys.stderr.write(str(xaction) + "\n")
         pass
