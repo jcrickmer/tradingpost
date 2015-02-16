@@ -49,24 +49,22 @@ class Rishada:
         account = self.backend.get_account(account_id)
         return account.get_balance()
 
-    '''
-    Given an account address to send funds from, and an address to
+    """ Given an account address to send funds from, and an address to
     send those funds, transfer the amount. This could raise an
     InsufficientFundsError if the amount exceeds the balance of the
     account referenced by from_address, or a AuthorizationError if we
     don't have the authorization necessary on the funding account.
-    '''
+    """
 
     def transfer_funds(self, from_address, to_address, amount):
         account = self.backend.get_account(from_address)
         account.transfer_funds(to_address, amount)
         return True
 
-    '''
-    Move funds from one account into a new escrow account. The
+    """ Move funds from one account into a new escrow account. The
     market_transaction_id will be used as a key for the new
     account/wallet that is created in the backend.
-    '''
+    """
 
     def escrow_funds(self, from_address, market_transaction_id, amount):
         if amount <= 0.0:
@@ -77,7 +75,7 @@ class Rishada:
         # this could throw an InsufficientFundsError or an AuthorizationError
         self.transfer_funds(from_address, escrow.get_account_id(), amount)
 
-        return True
+        return escrow.get_account_id()
 
     '''
     The buyer has confirmed receipt of the goods from seller, and thus

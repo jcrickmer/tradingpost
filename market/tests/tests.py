@@ -21,14 +21,17 @@ class BasicTestCase(TestCase):
     def test_create_participant(self):
         part = Participant()
         self.assertIsNotNone(part)
+        part.name = 'Nancy'
         part.save()
         self.assertIsNotNone(part)
         self.assertIsNotNone(part.id)
 
     def test_create_2_participants(self):
         part1 = Participant()
+        part1.name = 'Wilbur'
         part1.save()
         part2 = Participant()
+        part2.name = 'Juan'
         part2.save()
 
         part1 = Participant.objects.get(pk=part1.id)
@@ -58,13 +61,13 @@ class BasicTestCase(TestCase):
 
     def test_create_inventory(self):
         part = Participant()
+        part.name = 'Greg'
         part.save()
         stock = Stock()
         stock.save()
 
         inv = Inventory()
         inv.owner = part
-        inv.quantity = 1
         inv.stock = stock
         inv.value = .5
         inv.save()
@@ -75,10 +78,11 @@ class BasicTestCase(TestCase):
         self.assertEqual(inv.owner.id, part.id)
         self.assertEqual(inv.stock.id, stock.id)
         self.assertEqual(inv.value, .5)
-        self.assertEqual(inv.quantity, 1)
+        self.assertEqual(inv.status, Inventory.AVAILABLE_STATUS)
 
     def test_create_buyorder(self):
         part = Participant()
+        part.name = 'Alice'
         part.save()
         stock = Stock()
         stock.save()
@@ -86,7 +90,6 @@ class BasicTestCase(TestCase):
         buy = BuyOrder()
         buy.buyer = part
         buy.stock = stock
-        buy.quantity = 1
         buy.order_type = BuyOrder.MARKET_ORDER
         buy.save()
 
@@ -94,13 +97,13 @@ class BasicTestCase(TestCase):
         self.assertIsNotNone(buy)
         self.assertEquals(buy.stock.id, stock.id)
         self.assertEquals(buy.buyer.id, part.id)
-        self.assertEquals(buy.quantity, 1)
         self.assertEquals(buy.order_type, BuyOrder.MARKET_ORDER)
         self.assertLessEqual(buy.placed_datetime, timezone.now())
         self.assertIsNone(buy.fill_by_datetime)
 
     def test_create_sellorder(self):
         part = Participant()
+        part.name = 'Beth'
         part.save()
         stock = Stock()
         stock.save()
@@ -108,14 +111,12 @@ class BasicTestCase(TestCase):
         inv = Inventory()
         inv.owner = part
         inv.stock = stock
-        inv.quantity = 1
         inv.value = .5
         inv.save()
 
         sell = SellOrder()
         sell.seller = part
         sell.inventory = inv
-        sell.quantity = 1
         sell.order_type = SellOrder.MARKET_ORDER
         sell.save()
 
@@ -123,7 +124,6 @@ class BasicTestCase(TestCase):
         self.assertIsNotNone(sell)
         self.assertEquals(sell.inventory.id, inv.id)
         self.assertEquals(sell.seller.id, part.id)
-        self.assertEquals(sell.quantity, 1)
         self.assertEquals(sell.order_type, SellOrder.MARKET_ORDER)
         self.assertLessEqual(sell.placed_datetime, timezone.now())
         self.assertIsNone(sell.fill_by_datetime)
@@ -136,31 +136,30 @@ class BasicTestCase(TestCase):
         stock.save()
 
         seller = Participant()
+        seller.name = 'Samantha'
         seller.save()
 
         inv = Inventory()
         inv.owner = seller
         inv.stock = stock
-        inv.quantity = 1
         inv.value = .5
         inv.save()
 
         sell = SellOrder()
         sell.seller = seller
         sell.inventory = inv
-        sell.quantity = 1
         sell.order_type = SellOrder.LIMIT_ORDER
         sell.price = .55
         sell.save()
         sell = SellOrder.objects.get(pk=sell.id)
 
         buyer = Participant()
+        buyer.name = 'Beck'
         buyer.save()
 
         buy = BuyOrder()
         buy.buyer = buyer
         buy.stock = stock
-        buy.quantity = 1
         buy.order_type = BuyOrder.LIMIT_ORDER
         buy.price = .45
         buy.save()
@@ -319,6 +318,9 @@ class BasicTestCase(TestCase):
         # buyer should have some inventory...
         binv = Inventory.objects.filter(owner=buyer).first()
         self.assertEquals(binv.value, buy_price)
+
+
+class MatrixTestCase(TestCase):
 
     def test_clear_market_b_mark_funded_s_mark(self):
         seller_init_funds = 1.75
