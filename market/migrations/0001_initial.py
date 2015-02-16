@@ -15,7 +15,6 @@ class Migration(migrations.Migration):
             name='BuyOrder',
             fields=[
                 ('id', models.AutoField(serialize=False, primary_key=True)),
-                ('quantity', models.IntegerField()),
                 ('order_type', models.CharField(default=b'market', max_length=12, choices=[(b'limit', b'limit'), (b'market', b'market')])),
                 ('price', models.FloatField(null=True)),
                 ('placed_datetime', models.DateTimeField(default=django.utils.timezone.now, auto_now=True)),
@@ -26,10 +25,20 @@ class Migration(migrations.Migration):
             bases=(models.Model,),
         ),
         migrations.CreateModel(
+            name='ExternalMarketPrice',
+            fields=[
+                ('id', models.AutoField(serialize=False, primary_key=True)),
+                ('price_datetime', models.DateTimeField(default=django.utils.timezone.now, auto_now=True)),
+                ('price', models.FloatField()),
+            ],
+            options={
+            },
+            bases=(models.Model,),
+        ),
+        migrations.CreateModel(
             name='Inventory',
             fields=[
                 ('id', models.AutoField(serialize=False, primary_key=True)),
-                ('quantity', models.IntegerField(default=0)),
                 ('added_datetime', models.DateTimeField(default=django.utils.timezone.now, auto_now=True)),
                 ('value', models.FloatField()),
             ],
@@ -41,6 +50,7 @@ class Migration(migrations.Migration):
             name='Participant',
             fields=[
                 ('id', models.AutoField(serialize=False, primary_key=True)),
+                ('name', models.CharField(unique=True, max_length=100)),
             ],
             options={
             },
@@ -50,7 +60,6 @@ class Migration(migrations.Migration):
             name='SellOrder',
             fields=[
                 ('id', models.AutoField(serialize=False, primary_key=True)),
-                ('quantity', models.IntegerField()),
                 ('order_type', models.CharField(default=b'market', max_length=12, choices=[(b'limit', b'limit'), (b'market', b'market')])),
                 ('price', models.FloatField(null=True)),
                 ('placed_datetime', models.DateTimeField(default=django.utils.timezone.now, auto_now=True)),
@@ -76,7 +85,10 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.AutoField(serialize=False, primary_key=True)),
                 ('price', models.FloatField()),
-                ('filled_datetime', models.DateTimeField(default=django.utils.timezone.now, auto_now=True)),
+                ('initiated_datetime', models.DateTimeField(default=django.utils.timezone.now)),
+                ('shipped_datetime', models.DateTimeField(null=True)),
+                ('completed_datetime', models.DateTimeField(null=True)),
+                ('status', models.CharField(default=b'open', max_length=12, choices=[(b'open', b'open'), (b'shipped', b'shipped'), (b'closed', b'closed')])),
                 ('buy_order', models.ForeignKey(to='market.BuyOrder')),
                 ('sell_order', models.ForeignKey(to='market.SellOrder')),
             ],
@@ -103,6 +115,12 @@ class Migration(migrations.Migration):
             preserve_default=True,
         ),
         migrations.AddField(
+            model_name='externalmarketprice',
+            name='stock',
+            field=models.ForeignKey(to='market.Stock'),
+            preserve_default=True,
+        ),
+        migrations.AddField(
             model_name='buyorder',
             name='buyer',
             field=models.ForeignKey(to='market.Participant'),
@@ -112,6 +130,12 @@ class Migration(migrations.Migration):
             model_name='buyorder',
             name='stock',
             field=models.ForeignKey(to='market.Stock'),
+            preserve_default=True,
+        ),
+        migrations.AddField(
+            model_name='inventory',
+            name='status',
+            field=models.CharField(default=b'available', max_length=12, choices=[(b'available', b'available'), (b'sold', b'sold'), (b'shipped', b'shipped'), (b'delivered', b'delivered')]),
             preserve_default=True,
         ),
     ]

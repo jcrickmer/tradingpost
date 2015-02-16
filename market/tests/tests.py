@@ -6,7 +6,11 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from market.models import Participant, BuyOrder, SellOrder, Transaction, Stock, Inventory, Market, Account, ExternalMarketPrice
+from market.models import Participant, BuyOrder, SellOrder, Transaction, Stock, Inventory, Market, ExternalMarketPrice
+
+from rishada.rishada import Rishada, InsufficientFundsError
+
+from springjack.models import Springjack, Account, LedgerEntry
 
 import sys
 err = sys.stderr
@@ -162,7 +166,9 @@ class BasicTestCase(TestCase):
         buy.save()
         buy = BuyOrder.objects.get(pk=buy.id)
 
-        market = Market()
+        springjack = Springjack()
+        rishada = Rishada(springjack)
+        market = Market(rishada)
         self.assertEquals(.55, market.current_ask_price(stock))
         self.assertEquals(.45, market.current_bid_price(stock))
 
@@ -171,52 +177,74 @@ class BasicTestCase(TestCase):
         buyer_init_funds = 3.0
         buy_price = .51
         sell_price = buy_price
+        escrow_owner = Participant.objects.filter(name='HoodwinkEscrowOfficer').first()
+
+        springjack = Springjack()
+        rishada = Rishada(springjack)
+        market = Market(rishada)
 
         stock = Stock()
         stock.save()
 
+        # SELLER
         seller = Participant()
+        seller.name = 'Seller Joe'
         seller.save()
 
-        saccount = Account()
-        saccount.owner = seller
-        saccount.funds = seller_init_funds
-        saccount.save()
+        # Setup the seller account with some money
+        saccount = rishada.create_account(seller.id)
+
+        sile = LedgerEntry()
+        sile.account = saccount
+        sile.amount = seller_init_funds
+        sile.other_memo = 'starting balance'
+        sile.txid = 'fakedit0'
+        sile.save()
+
+        self.assertEquals(rishada.get_balance(saccount.id), seller_init_funds)
 
         inv = Inventory()
         inv.owner = seller
         inv.stock = stock
-        inv.quantity = 1
         inv.value = .5
         inv.save()
 
         sell = SellOrder()
         sell.seller = seller
         sell.inventory = inv
-        sell.quantity = 1
         sell.order_type = SellOrder.LIMIT_ORDER
         sell.price = sell_price
+        # this essentially places the order in the market
         sell.save()
         sell = SellOrder.objects.get(pk=sell.id)
 
+        # BUYER
         buyer = Participant()
+        buyer.name = 'Buyer Bob'
         buyer.save()
 
-        baccount = Account()
-        baccount.owner = buyer
-        baccount.funds = buyer_init_funds
-        baccount.save()
+        # Setup the buyer account with some money
+        baccount = rishada.create_account(buyer.id)
+
+        bile = LedgerEntry()
+        bile.account = baccount
+        bile.amount = buyer_init_funds
+        bile.other_memo = 'buyer starting balance'
+        bile.txid = 'fakedit1'
+        bile.save()
+
+        self.assertEquals(rishada.get_balance(baccount.id), buyer_init_funds)
 
         buy = BuyOrder()
         buy.buyer = buyer
         buy.stock = stock
-        buy.quantity = 1
         buy.order_type = BuyOrder.LIMIT_ORDER
         buy.price = buy_price
+        # this essentially places the order in the market
         buy.save()
         buy = BuyOrder.objects.get(pk=buy.id)
 
-        market = Market()
+        # Test market
         self.assertEquals(buy_price, market.current_ask_price(stock))
         self.assertEquals(buy_price, market.current_bid_price(stock))
 
@@ -225,8 +253,10 @@ class BasicTestCase(TestCase):
         # buyer should have none.
         self.assertEquals(Inventory.manager.count(buyer, stock), 0)
 
+        # Connect buyers and sellers
         market.clear_market()
 
+        # TEST that clear_market() made the right transaction
         xaction_count = Transaction.objects.all().count()
         xactions = Transaction.objects.filter(buy_order=buy)
         self.assertEquals(xactions.count(), 1)
@@ -236,23 +266,59 @@ class BasicTestCase(TestCase):
         self.assertEquals(xaction.sell_order.id, sell.id)
         self.assertEquals(xaction.price, buy_price)
 
-        self.assertLessEqual(xaction.filled_datetime, timezone.now())
+        self.assertLessEqual(xaction.initiated_datetime, timezone.now())
+        self.assertIsNone(xaction.shipped_datetime)
+        self.assertIsNone(xaction.completed_datetime)
 
         # seller should have reduced inventory.
         self.assertEquals(Inventory.manager.count(seller, stock), 0)
-        # buyer should have inventory.
-        self.assertEquals(Inventory.manager.count(buyer, stock), 1)
 
-        saccount = Account.objects.get(pk=saccount.id)
-        baccount = Account.objects.get(pk=baccount.id)
-        self.assertEquals(saccount.balance(), seller_init_funds + buy_price)
-        self.assertEquals(baccount.balance(), buyer_init_funds - buy_price)
+        # buyer doesn't have it yet...
+        self.assertEquals(Inventory.manager.count(buyer, stock), 0)
+
+        # seller inventory should be statused as sold
+        inv = Inventory.objects.get(pk=inv.id)
+        self.assertEquals(inv.status, Inventory.SOLD_STATUS)
+
+        # seller does not have funds yet - they are in escrow
+        self.assertEquals(rishada.get_balance(saccount.id), seller_init_funds)
+
+        # but buyer is out the money
+        self.assertEquals(rishada.get_balance(baccount.id), buyer_init_funds - buy_price)
+
+        # and market price should be updated.
         self.assertEquals(market.current_market_price(stock), buy_price)
 
         # one last check to make sure that clearing the market again doesn't dup any transactions
         market.clear_market()
         self.assertEquals(Transaction.objects.all().count(), xaction_count)
         self.assertEquals(market.current_market_price(stock), buy_price)
+
+        # seller ships it
+        xaction.ship()
+
+        # buyer gets it!
+        xaction.close()
+
+        # yay, the buyer got their goods!
+        rishada.release_escrow(rishada.get_account_by_participant_id(xaction.sell_order.seller.id).get_account_id(), xaction.id)
+
+        # seller inventory should be statused as delivered
+        inv = Inventory.objects.get(pk=inv.id)
+        self.assertEquals(inv.status, Inventory.DELIVERED_STATUS)
+
+        # buyer is still out the money
+        self.assertEquals(rishada.get_balance(baccount.id), buyer_init_funds - buy_price)
+
+        # seller has his money!
+        self.assertEquals(rishada.get_balance(saccount.id), seller_init_funds + buy_price)
+
+        # and market price should still be buy_price
+        self.assertEquals(market.current_market_price(stock), buy_price)
+
+        # buyer should have some inventory...
+        binv = Inventory.objects.filter(owner=buyer).first()
+        self.assertEquals(binv.value, buy_price)
 
     def test_clear_market_b_mark_funded_s_mark(self):
         seller_init_funds = 1.75

@@ -7,17 +7,24 @@ from django.db.models import Q, Count, Min, Sum, Avg
 import sys
 
 
-class Participant(models.Model):
+class Stock(models.Model):
     id = models.AutoField(primary_key=True)
 
     def __unicode__(self):
-        return '[Participant ' + str(self.id) + ']'
+        return '[Stock {}]'.format(str(self.id))
+
+
+class Participant(models.Model):
+    id = models.AutoField(primary_key=True)
+    name = models.CharField(max_length=100, null=False, unique=True)
+
+    def __unicode__(self):
+        return '[Participant {} {}]'.format(str(self.id), self.name)
 
 
 class BuyOrder(models.Model):
     id = models.AutoField(primary_key=True)
     buyer = models.ForeignKey('Participant', null=False)
-    quantity = models.IntegerField(null=False)
     stock = models.ForeignKey('Stock', null=False)
     LIMIT_ORDER = 'limit'
     #STOP_ORDER = 'stop'
@@ -48,11 +55,19 @@ class BuyOrder(models.Model):
         for xaction in Transaction.objects.filter(buy_order=self).all():
             return xaction
 
+    def __unicode__(self):
+        return '[BuyOrder {}: {} selling {} at {} as {}]'.format(
+            str(
+                self.id), str(
+                self.buyer), str(
+                self.stock), str(
+                    self.price), str(
+                        self.order_type))
+
 
 class SellOrder(models.Model):
     id = models.AutoField(primary_key=True)
     seller = models.ForeignKey('Participant')
-    quantity = models.IntegerField(null=False)
     inventory = models.ForeignKey('Inventory', null=False)
     LIMIT_ORDER = 'limit'
     #STOP_ORDER = 'stop'
@@ -65,9 +80,32 @@ class SellOrder(models.Model):
     placed_datetime = models.DateTimeField(default=timezone.now, auto_now=True, null=False)
     fill_by_datetime = models.DateTimeField(null=True)
 
+    STATUS_OPEN = 'open'
+    STATUS_FILLED = 'filled'
+    STATUS_EXPIRED = 'expired'
+
+    def status(self):
+        ''' Check to see if the order is still valid. '''
+        if self.fill_by_datetime is not None and self.fill_by_datetime < timezone.now():
+            return self.STATUS_EXPIRED
+
+        if self.get_transaction is not None:
+            return self.STATUS_FILLED
+
+        return STATUS.OPEN
+
+    def get_transaction(self):
+        for xaction in Transaction.objects.filter(sell_order=self).all():
+            return xaction
+
     def __unicode__(self):
-        return '[SellOrder ' + str(self.id) + ': ' + str(self.seller) + ' selling ' + str(self.quantity) + \
-            ' ' + str(self.inventory.stock) + ' at ' + str(self.price) + ' as ' + str(self.order_type) + ']'
+        return '[SellOrder {}: {} selling {} at {} as {}]'.format(
+            str(
+                self.id), str(
+                self.seller), str(
+                self.inventory.stock), str(
+                    self.price), str(
+                        self.order_type))
 
 
 class Transaction(models.Model):
@@ -75,8 +113,33 @@ class Transaction(models.Model):
     buy_order = models.ForeignKey('BuyOrder', null=False)
     sell_order = models.ForeignKey('SellOrder', null=False)
     price = models.FloatField(null=False)
-    filled_datetime = models.DateTimeField(default=timezone.now, auto_now=True, null=False)
+    initiated_datetime = models.DateTimeField(default=timezone.now, auto_now=False, null=False)
+    shipped_datetime = models.DateTimeField(auto_now=False, null=True)
+    completed_datetime = models.DateTimeField(auto_now=False, null=True)
     # For now, quantity must match
+
+    OPEN_STATUS = 'open'
+    SHIPPED_STATUS = 'shipped'
+    CLOSED_STATUS = 'closed'
+    STATUS_CHOICES = ((OPEN_STATUS, OPEN_STATUS),
+                      (SHIPPED_STATUS, SHIPPED_STATUS),
+                      (CLOSED_STATUS, CLOSED_STATUS))
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=OPEN_STATUS)
+
+    def ship(self):
+        self.status = self.SHIPPED_STATUS
+        self.shipped_datetime = timezone.now()
+        self.save()
+        self.sell_order.inventory.status = Inventory.SHIPPED_STATUS
+        self.sell_order.inventory.save()
+
+    def close(self):
+        self.status = self.CLOSED_STATUS
+        self.completed_datetime = timezone.now()
+        self.save()
+
+        self.sell_order.inventory.deliver_to(self.buy_order, self.price)
+        self.sell_order.inventory.save()
 
     def __unicode__(self):
         return '[Transaction {}: {} sold {} to {} for {} at {}]'.format(
@@ -88,21 +151,18 @@ class Transaction(models.Model):
             self.filled_datetime)
 
 
-class Stock(models.Model):
-    id = models.AutoField(primary_key=True)
-
-    def __unicode__(self):
-        return '[Stock ' + str(self.id) + ']'
-
-
 class InventoryManager(models.Manager):
 
+    '''
+    Look at all of the inventory for this owner for the given stock,
+    and add it all up. Should always return 0 or a positive integer.
+    '''
+
     def count(self, owner, stock):
-        ''' Look at all of the inventory for this owner for the given stock, and add it all up. Should always return 0 or a positive integer. '''
         result = 0
-        qr = Inventory.objects.filter(owner=owner, stock=stock).aggregate(Sum('quantity'))
-        if qr is not None and qr['quantity__sum'] is not None:
-            result = qr['quantity__sum']
+        qr = Inventory.objects.filter(owner=owner, stock=stock, status=Inventory.AVAILABLE_STATUS).aggregate(Count('id'))
+        if qr is not None and qr['id__count'] is not None:
+            result = qr['id__count']
         return result
 
 
@@ -110,28 +170,34 @@ class Inventory(models.Model):
     id = models.AutoField(primary_key=True)
     owner = models.ForeignKey('Participant', null=False)
     stock = models.ForeignKey('Stock', null=False)
-    quantity = models.IntegerField(default=0, null=False)
     added_datetime = models.DateTimeField(default=timezone.now, auto_now=True, null=False)
     value = models.FloatField(null=False)
     related_buy = models.ForeignKey('BuyOrder', null=True)
 
+    AVAILABLE_STATUS = 'available'
+    SOLD_STATUS = 'sold'
+    SHIPPED_STATUS = 'shipped'
+    DELIVERED_STATUS = 'delivered'
+    STATUS_CHOICES = ((AVAILABLE_STATUS, AVAILABLE_STATUS),
+                      (SOLD_STATUS, SOLD_STATUS),
+                      (SHIPPED_STATUS, SHIPPED_STATUS),
+                      (DELIVERED_STATUS, DELIVERED_STATUS))
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=AVAILABLE_STATUS)
+
     objects = models.Manager()
     manager = InventoryManager()
 
+    def deliver_to(self, buy_order, price):
+        self.status = Inventory.DELIVERED_STATUS
+        newinv = Inventory()
+        newinv.owner = buy_order.buyer
+        newinv.stock = self.stock
+        newinv.value = price
+        newinv.related_buy = buy_order
+        newinv.save()
+
     def __unicode__(self):
         return '[Inventory {}: ]'.format(self.id)
-
-
-class Account(models.Model):
-    id = models.AutoField(primary_key=True)
-    owner = models.ForeignKey('Participant', unique=True, null=False)
-    funds = models.FloatField(null=False)
-
-    def balance(self):
-        return self.funds
-
-    def escrow_funds(self, amount):
-        pass
 
 
 class ExternalMarketPrice(models.Model):
@@ -142,6 +208,9 @@ class ExternalMarketPrice(models.Model):
 
 
 class Market():
+
+    def __init__(self, rishada):
+        self.rishada = rishada
 
     def match(self):
         # do the logic to match buyers and sellers, and create transactions as needed
@@ -165,7 +234,7 @@ class Market():
         result = None
 
         # First, let's just get the most recent transaction and use it to determine market price
-        transaction = Transaction.objects.filter(buy_order__stock=stock).order_by('-filled_datetime').first()
+        transaction = Transaction.objects.filter(buy_order__stock=stock).order_by('-initiated_datetime').first()
         if transaction is not None:
             result = transaction.price
 
@@ -180,8 +249,11 @@ class Market():
 
         return result
 
+    '''
+    Match buyers and selers.
+    '''
+
     def clear_market(self):
-        ''' Match buyers and selers. '''
 
         # Find all open buys.
         buys = BuyOrder.objects.filter(Q(fill_by_datetime__lte=timezone.now()) | Q(fill_by_datetime=None), transaction=None)
@@ -227,10 +299,16 @@ class Market():
                     xaction_price = self.current_market_price(buyorder.stock)
 
                 # second, does the buyer have money?
-                buy_acct = Account.objects.filter(owner=buyorder.buyer).first()
-                if buy_acct.balance() < xaction_price:
+                buy_address = buyorder.buyer.account_set.first().get_account_id()
+                if self.rishada.get_balance(buy_address) < xaction_price:
                     # no dice
                     continue
+
+                escrow_owner = Participant.objects.filter(name='HoodwinkEscrowOfficer').first()
+                if escrow_owner is None:
+                    raise Error('Make this a real error.')
+
+                # REVISIT - need to wrap all of this in a transaction.
 
                 # third, create a transaction
                 xaction = Transaction()
@@ -240,26 +318,19 @@ class Market():
                 xaction.save()
 
                 # now move the inventory
-                seller_out_inv = Inventory()
-                seller_out_inv.owner = sellorder.seller
-                seller_out_inv.stock = sellorder.inventory.stock
-                seller_out_inv.quantity = -1
-                seller_out_inv.value = xaction.price
+                seller_out_inv = sellorder.inventory
+                seller_out_inv.status = Inventory.SOLD_STATUS
                 seller_out_inv.save()
-                buyer_in_inv = Inventory()
-                buyer_in_inv.owner = buyorder.buyer
-                buyer_in_inv.stock = sellorder.inventory.stock
-                buyer_in_inv.quantity = 1
-                buyer_in_inv.value = xaction.price
-                buyer_in_inv.related_buy = buyorder
-                buyer_in_inv.save()
 
                 # last move the money
-                buy_acct = Account.objects.filter(owner=buyorder.buyer).first()
-                sell_acct = Account.objects.filter(owner=sellorder.seller).first()
-                buy_acct.funds = buy_acct.funds - xaction.price
-                sell_acct.funds = sell_acct.funds + xaction.price
-                buy_acct.save()
-                sell_acct.save()
-                #sys.stderr.write(str(xaction) + "\n")
+                sell_address = sellorder.seller.account_set.first().get_account_id()
+                self.rishada.escrow_funds(buy_address, xaction.id, xaction.price)
+
+                #buy_acct = Account.objects.filter(owner=buyorder.buyer).first()
+                #sell_acct = Account.objects.filter(owner=sellorder.seller).first()
+                #buy_acct.funds = buy_acct.funds - xaction.price
+                #sell_acct.funds = sell_acct.funds + xaction.price
+                # buy_acct.save()
+                # sell_acct.save()
+                ##sys.stderr.write(str(xaction) + "\n")
         pass
