@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 
 from django.db import models, migrations
 import django.utils.timezone
+import uuid
 
 def init_escrow_account(apps, schema_editor):
     Participant = apps.get_model("market", "Participant")
@@ -22,6 +23,7 @@ class Migration(migrations.Migration):
             fields=[
                 ('id', models.AutoField(serialize=False, primary_key=True)),
                 ('owner', models.ForeignKey(to='market.Participant')),
+                ('account_key', models.CharField(max_length=56, default=uuid.uuid4, unique=True, null=False)),
             ],
             options={
             },

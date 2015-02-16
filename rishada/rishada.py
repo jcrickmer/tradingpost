@@ -104,7 +104,7 @@ class Rishada:
                 xaction.price))
 
         # this could throw an AuthorizationError, which would be a deep problem indeed.
-        self.transfer_funds(escrow_account.id, seller_account.id, xaction.price)
+        self.transfer_funds(escrow_account.get_account_id(), seller_account.get_account_id(), xaction.price)
 
         return True
 

@@ -201,7 +201,7 @@ class BasicTestCase(TestCase):
         sile.txid = 'fakedit0'
         sile.save()
 
-        self.assertEquals(rishada.get_balance(saccount.id), seller_init_funds)
+        self.assertEquals(rishada.get_balance(saccount.get_account_id()), seller_init_funds)
 
         inv = Inventory()
         inv.owner = seller
@@ -233,7 +233,7 @@ class BasicTestCase(TestCase):
         bile.txid = 'fakedit1'
         bile.save()
 
-        self.assertEquals(rishada.get_balance(baccount.id), buyer_init_funds)
+        self.assertEquals(rishada.get_balance(baccount.get_account_id()), buyer_init_funds)
 
         buy = BuyOrder()
         buy.buyer = buyer
@@ -281,10 +281,10 @@ class BasicTestCase(TestCase):
         self.assertEquals(inv.status, Inventory.SOLD_STATUS)
 
         # seller does not have funds yet - they are in escrow
-        self.assertEquals(rishada.get_balance(saccount.id), seller_init_funds)
+        self.assertEquals(rishada.get_balance(saccount.get_account_id()), seller_init_funds)
 
         # but buyer is out the money
-        self.assertEquals(rishada.get_balance(baccount.id), buyer_init_funds - buy_price)
+        self.assertEquals(rishada.get_balance(baccount.get_account_id()), buyer_init_funds - buy_price)
 
         # and market price should be updated.
         self.assertEquals(market.current_market_price(stock), buy_price)
@@ -308,10 +308,10 @@ class BasicTestCase(TestCase):
         self.assertEquals(inv.status, Inventory.DELIVERED_STATUS)
 
         # buyer is still out the money
-        self.assertEquals(rishada.get_balance(baccount.id), buyer_init_funds - buy_price)
+        self.assertEquals(rishada.get_balance(baccount.get_account_id()), buyer_init_funds - buy_price)
 
         # seller has his money!
-        self.assertEquals(rishada.get_balance(saccount.id), seller_init_funds + buy_price)
+        self.assertEquals(rishada.get_balance(saccount.get_account_id()), seller_init_funds + buy_price)
 
         # and market price should still be buy_price
         self.assertEquals(market.current_market_price(stock), buy_price)

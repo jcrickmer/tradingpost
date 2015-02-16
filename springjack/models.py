@@ -22,6 +22,7 @@ class Account(models.Model, RishadaAccount):
     id = models.AutoField(primary_key=True)
     owner = models.ForeignKey('market.Participant', null=False)
     #address = models.CharField(max_length=56, unique=True, null=False)
+    account_key = models.CharField(max_length=56, default=uuid.uuid4, unique=True, null=False)
 
     '''
     Required by RishadaAccount
@@ -31,7 +32,7 @@ class Account(models.Model, RishadaAccount):
     '''
 
     def get_account_id(self):
-        return self.id
+        return self.account_key
 
     '''
     Required by RishadaAccount
@@ -76,7 +77,7 @@ class Account(models.Model, RishadaAccount):
         sentry.account = self
         sentry.amount = -1.0 * famount
         sentry.txid = 'foo'
-        sentry.other_account = Account.objects.get(pk=to_account_id)
+        sentry.other_account = Account.objects.get(account_key=to_account_id)
         if sentry.account is None:
             raise 'Invalid Address error, dude.'
         sentry.save()
@@ -125,7 +126,7 @@ class Springjack(RishadaBackend):
     '''
 
     def get_account(self, account_id):
-        acct = Account.objects.filter(id=int(account_id)).first()
+        acct = Account.objects.filter(account_key=account_id).first()
         return acct
 
     '''
