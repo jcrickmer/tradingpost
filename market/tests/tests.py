@@ -13,7 +13,7 @@ from rishada.rishada import Rishada, InsufficientFundsError
 from springjack.models import Springjack, Account, LedgerEntry
 
 from django.db.models import Q, Count, Min, Sum, Avg
-
+import uuid
 import sys
 err = sys.stderr
 
@@ -2019,3 +2019,303 @@ class BasicTestCase(TestCase):
 
     def test_clear_market_b_mark_unfunded_s_lim_nomatch(self):
         self.assertTrue(True)
+
+
+class MultiTestCases(TestCase):
+
+    def setup_person(self, rishada, name, balance):
+        player = Participant()
+        player.name = name
+        player.save()
+        acct = rishada.create_account(player.id)
+        sile = LedgerEntry()
+        sile.account = acct
+        sile.amount = balance
+        sile.other_memo = 'starting balance'
+        sile.txid = 'fakedit' + str(uuid.uuid4())
+        sile.save()
+        return player
+
+    def setup_accounts(self):
+        self.escrow_owner = Participant.objects.filter(name='HoodwinkEscrowOfficer').first()
+
+        self.stock_a = Stock()
+        self.stock_a.save()
+        self.stock_b = Stock()
+        self.stock_b.save()
+
+        # SELLERS
+        sally_starting_balance = 10
+        self.sally = self.setup_person(self.rishada, 'Sally', sally_starting_balance)
+        self.sally_inv = Inventory()
+        self.sally_inv.owner = self.sally
+        self.sally_inv.stock = self.stock_a
+        self.sally_inv.value = .5
+        self.sally_inv.save()
+
+        sam_starting_balance = 11
+        self.sam = self.setup_person(self.rishada, 'Sam', sam_starting_balance)
+        self.sam_inv = Inventory()
+        self.sam_inv.owner = self.sam
+        self.sam_inv.stock = self.stock_a
+        self.sam_inv.value = .5
+        self.sam_inv.save()
+
+        steve_starting_balance = 12
+        self.steve = self.setup_person(self.rishada, 'Steve', steve_starting_balance)
+        self.steve_inv = Inventory()
+        self.steve_inv.owner = self.steve
+        self.steve_inv.stock = self.stock_a
+        self.steve_inv.value = .5
+        self.steve_inv.save()
+
+        stuart_starting_balance = 13
+        self.stuart = self.setup_person(self.rishada, 'Stuart', stuart_starting_balance)
+        self.stuart_inv = Inventory()
+        self.stuart_inv.owner = self.stuart
+        self.stuart_inv.stock = self.stock_a
+        self.stuart_inv.value = .5
+        self.stuart_inv.save()
+
+        sid_starting_balance = 14
+        self.sid = self.setup_person(self.rishada, 'Sid', sid_starting_balance)
+        self.sid_inv = Inventory()
+        self.sid_inv.owner = self.sid
+        self.sid_inv.stock = self.stock_a
+        self.sid_inv.value = .5
+        self.sid_inv.save()
+
+        # BUYERS
+        bob_starting_balance = 3.33
+        self.bob = self.setup_person(self.rishada, 'Bob', bob_starting_balance)
+
+        beau_starting_balance = 5.33
+        self.beau = self.setup_person(self.rishada, 'Beau', beau_starting_balance)
+
+        barb_starting_balance = 7.33
+        self.barb = self.setup_person(self.rishada, 'Barb', barb_starting_balance)
+
+        betty_starting_balance = 10.33
+        self.betty = self.setup_person(self.rishada, 'Betty', betty_starting_balance)
+
+        basil_starting_balance = 13.33
+        self.basil = self.setup_person(self.rishada, 'Basil', basil_starting_balance)
+
+        base_economy = sally_starting_balance + sam_starting_balance + steve_starting_balance + stuart_starting_balance + sid_starting_balance + \
+            bob_starting_balance + beau_starting_balance + barb_starting_balance + betty_starting_balance + basil_starting_balance
+        return base_economy
+
+    def test_clear_market_multiples_0(self):
+        springjack = Springjack()
+        self.rishada = Rishada(springjack)
+        market = Market(self.rishada)
+
+        base_economy = self.setup_accounts()
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        barb_buy = BuyOrder(buyer=self.barb, stock=self.stock_a, order_type=BuyOrder.MARKET_ORDER)
+        barb_buy.save()
+
+        bob_buy = BuyOrder(buyer=self.bob, stock=self.stock_a, order_type=BuyOrder.MARKET_ORDER)
+        bob_buy.save()
+
+        basil_buy = BuyOrder(buyer=self.basil, stock=self.stock_a, order_type=BuyOrder.LIMIT_ORDER, price=1.25)
+        basil_buy.save()
+
+        stuart_sell = SellOrder(seller=self.stuart, inventory=self.stuart_inv, order_type=SellOrder.LIMIT_ORDER, price=1.2)
+        stuart_sell.save()
+
+        sam_sell = SellOrder(seller=self.sam, inventory=self.sam_inv, order_type=SellOrder.LIMIT_ORDER, price=1.4)
+        sam_sell.save()
+
+        sid_sell = SellOrder(seller=self.sid, inventory=self.sid_inv, order_type=SellOrder.LIMIT_ORDER, price=1.6)
+        sid_sell.save()
+
+        # Connect buyers and sellers
+        market.clear_market()
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # 3 sell orders and 3 buy orders. They will be evaluated in the order that they were put in.
+        # Barb will win Stuart's sell. Barb's account will move 1.2 to escrow
+        # That will set the market price to 1.2
+        # Then bob will win Sam's sell. Bob's account will move 1.4 to escrow
+        # That will set the market price to 1.4
+        # Then Basil's order will look for a deal at 1.25 or below, and not find anything.
+        # Sid will sell nothing.
+
+        self.stuart_inv = Inventory.objects.get(pk=self.stuart_inv.id)
+        xactions = Transaction.objects.filter(buy_order=barb_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.stuart_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.barb.id).get_balance(), 7.33 - 1.2, places=7)
+
+        self.sam_inv = Inventory.objects.get(pk=self.sam_inv.id)
+        xactions = Transaction.objects.filter(buy_order=bob_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.sam_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.bob.id).get_balance(), 3.33 - 1.4, places=7)
+
+        self.sid_inv = Inventory.objects.get(pk=self.sid_inv.id)
+        xactions = Transaction.objects.filter(buy_order=basil_buy)
+        self.assertEquals(xactions.count(), 0)
+        self.assertEquals(self.sid_inv.status, Inventory.AVAILABLE_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.basil.id).get_balance(), 13.33, places=7)
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # Test market
+        self.assertEquals(market.current_market_price(self.stock_a), 1.4)
+        self.assertEquals(market.current_bid_price(self.stock_a), 1.25)
+        self.assertEquals(market.current_ask_price(self.stock_a), 1.6)
+
+    def test_clear_market_multiples_1(self):
+        springjack = Springjack()
+        self.rishada = Rishada(springjack)
+        market = Market(self.rishada)
+
+        base_economy = self.setup_accounts()
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        barb_buy = BuyOrder(buyer=self.barb, stock=self.stock_a, order_type=BuyOrder.MARKET_ORDER)
+        barb_buy.save()
+
+        bob_buy = BuyOrder(buyer=self.bob, stock=self.stock_a, order_type=BuyOrder.MARKET_ORDER)
+        bob_buy.save()
+
+        basil_buy = BuyOrder(buyer=self.basil, stock=self.stock_a, order_type=BuyOrder.LIMIT_ORDER, price=1.25)
+        basil_buy.save()
+
+        # Sellers enter market in different order than in test _1. Results should be the same, though.
+        sid_sell = SellOrder(seller=self.sid, inventory=self.sid_inv, order_type=SellOrder.LIMIT_ORDER, price=1.6)
+        sid_sell.save()
+
+        sam_sell = SellOrder(seller=self.sam, inventory=self.sam_inv, order_type=SellOrder.LIMIT_ORDER, price=1.4)
+        sam_sell.save()
+
+        stuart_sell = SellOrder(seller=self.stuart, inventory=self.stuart_inv, order_type=SellOrder.LIMIT_ORDER, price=1.2)
+        stuart_sell.save()
+
+        # Connect buyers and sellers
+        market.clear_market()
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # 3 sell orders and 3 buy orders. They will be evaluated in the order that they were put in.
+        # Barb will win Stuart's sell. Barb's account will move 1.2 to escrow
+        # That will set the market price to 1.2
+        # Then bob will win Sam's sell. Bob's account will move 1.4 to escrow
+        # That will set the market price to 1.4
+        # Then Basil's order will look for a deal at 1.25 or below, and not find anything.
+        # Sid will sell nothing.
+
+        self.stuart_inv = Inventory.objects.get(pk=self.stuart_inv.id)
+        xactions = Transaction.objects.filter(buy_order=barb_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.stuart_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.barb.id).get_balance(), 7.33 - 1.2, places=7)
+
+        self.sam_inv = Inventory.objects.get(pk=self.sam_inv.id)
+        xactions = Transaction.objects.filter(buy_order=bob_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.sam_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.bob.id).get_balance(), 3.33 - 1.4, places=7)
+
+        self.sid_inv = Inventory.objects.get(pk=self.sid_inv.id)
+        xactions = Transaction.objects.filter(buy_order=basil_buy)
+        self.assertEquals(xactions.count(), 0)
+        self.assertEquals(self.sid_inv.status, Inventory.AVAILABLE_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.basil.id).get_balance(), 13.33, places=7)
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # Test market
+        self.assertEquals(market.current_market_price(self.stock_a), 1.4)
+        self.assertEquals(market.current_bid_price(self.stock_a), 1.25)
+        self.assertEquals(market.current_ask_price(self.stock_a), 1.6)
+
+    def test_clear_market_multiples_2(self):
+        springjack = Springjack()
+        self.rishada = Rishada(springjack)
+        market = Market(self.rishada)
+
+        base_economy = self.setup_accounts()
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # Now buyers enter the market in a different order. This will change the outcome!
+        basil_buy = BuyOrder(buyer=self.basil, stock=self.stock_a, order_type=BuyOrder.LIMIT_ORDER, price=1.25)
+        basil_buy.save()
+
+        bob_buy = BuyOrder(buyer=self.bob, stock=self.stock_a, order_type=BuyOrder.MARKET_ORDER)
+        bob_buy.save()
+
+        barb_buy = BuyOrder(buyer=self.barb, stock=self.stock_a, order_type=BuyOrder.MARKET_ORDER)
+        barb_buy.save()
+
+        stuart_sell = SellOrder(seller=self.stuart, inventory=self.stuart_inv, order_type=SellOrder.LIMIT_ORDER, price=1.2)
+        stuart_sell.save()
+
+        sam_sell = SellOrder(seller=self.sam, inventory=self.sam_inv, order_type=SellOrder.LIMIT_ORDER, price=1.4)
+        sam_sell.save()
+
+        sid_sell = SellOrder(seller=self.sid, inventory=self.sid_inv, order_type=SellOrder.LIMIT_ORDER, price=1.6)
+        sid_sell.save()
+
+        # Connect buyers and sellers
+        market.clear_market()
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # 3 sell orders and 3 buy orders. They will be evaluated in the order that they were put in.
+        # Basil's limit order will match Stuart's sell. Basil's account will move 1.2 to escrow
+        # That will set the market price to 1.2
+        # Then bob will win Sam's sell. Bob's account will move 1.4 to escrow
+        # That will set the market price to 1.4
+        # Then Stuart's order will win Sid's order at 1.6.
+        # Final Market price will be 1.6.
+
+        self.stuart_inv = Inventory.objects.get(pk=self.stuart_inv.id)
+        xactions = Transaction.objects.filter(buy_order=basil_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.stuart_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.basil.id).get_balance(), 13.33 - 1.2, places=7)
+
+        self.sam_inv = Inventory.objects.get(pk=self.sam_inv.id)
+        xactions = Transaction.objects.filter(buy_order=bob_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.sam_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.bob.id).get_balance(), 3.33 - 1.4, places=7)
+
+        self.sid_inv = Inventory.objects.get(pk=self.sid_inv.id)
+        xactions = Transaction.objects.filter(buy_order=barb_buy)
+        self.assertEquals(xactions.count(), 1)
+        self.assertEquals(self.sid_inv.status, Inventory.SOLD_STATUS)
+        self.assertAlmostEquals(self.rishada.get_account_by_participant_id(self.barb.id).get_balance(), 7.33 - 1.6, places=7)
+
+        # Check to make sure no money has entered or left the system
+        cur_economy = LedgerEntry.objects.all().aggregate(Sum('amount'))['amount__sum']
+        self.assertAlmostEquals(cur_economy, base_economy, places=7)
+
+        # Test market
+        self.assertEquals(market.current_market_price(self.stock_a), 1.6)
+        self.assertIsNone(market.current_bid_price(self.stock_a))
+        self.assertIsNone(market.current_ask_price(self.stock_a))

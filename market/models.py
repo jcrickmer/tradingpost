@@ -217,14 +217,20 @@ class Market():
         pass
 
     def current_bid_price(self, stock):
-        buyorder = BuyOrder.objects.filter(stock=stock).exclude(order_type=BuyOrder.MARKET_ORDER).order_by('-price').first()
+        buyorder = BuyOrder.objects.filter(
+            stock=stock,
+            transaction=None).exclude(
+            order_type=BuyOrder.MARKET_ORDER).order_by('-price').first()
         if buyorder is not None:
             return buyorder.price
         else:
             return None
 
     def current_ask_price(self, stock):
-        sellorder = SellOrder.objects.filter(inventory__stock=stock).exclude(order_type=SellOrder.MARKET_ORDER).order_by('price').first()
+        sellorder = SellOrder.objects.filter(
+            inventory__stock=stock,
+            transaction=None).exclude(
+            order_type=SellOrder.MARKET_ORDER).order_by('price').first()
         if sellorder is not None:
             return sellorder.price
         else:
@@ -233,8 +239,12 @@ class Market():
     def current_market_price(self, stock):
         result = None
 
-        # First, let's just get the most recent transaction and use it to determine market price
-        transaction = Transaction.objects.filter(buy_order__stock=stock).order_by('-initiated_datetime').first()
+        # First, let's just get the most recent transaction and use it
+        # to determine market price.  Note that sometimes that
+        # initiated_datetime of multiple transactions could be the
+        # same. So leverage the auto-increment id to ferret out the
+        # winner.
+        transaction = Transaction.objects.filter(buy_order__stock=stock).order_by('-initiated_datetime').order_by('-id').first()
         if transaction is not None:
             result = transaction.price
 
@@ -257,10 +267,11 @@ class Market():
 
         # Find all open buys.
         buys = BuyOrder.objects.filter(Q(fill_by_datetime__lte=timezone.now()) | Q(fill_by_datetime=None), transaction=None)
+        #sys.stderr.write('Market.clear_market: looking at {} buy orders\n'.format(str(buys.count())))
 
         # Fore each of these buys, let's see if we can find someone willing to sell at that price
         for buyorder in buys:
-            #sys.stderr.write(str(buyorder.buyer) + " is looking for seller of " + str(buyorder.stock))
+            #sys.stderr.write('Market.clear_market: {} is looking for a seller of {}\n'.format(str(buyorder.buyer), str(buyorder.stock)))
             # You cannot buy from yourself.
             sellorder_qs = SellOrder.objects.exclude(seller=buyorder.buyer)
             # Only look at stock that we are buying
@@ -333,4 +344,3 @@ class Market():
                 # buy_acct.save()
                 # sell_acct.save()
                 ##sys.stderr.write(str(xaction) + "\n")
-        pass
