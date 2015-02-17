@@ -1,6 +1,11 @@
 # tradingpost
 Trading Post
 
+The market is a "buyer's market", and will always optimize for the
+lowest price. Thus, if a buyer puts in a LIMIT order for 8, and a
+seller puts in a LIMIT order for 7, a transaction will be made at the
+seller's price of 7.
+
 Market
  Stock
  Participant
